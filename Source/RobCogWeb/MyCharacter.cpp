@@ -64,6 +64,9 @@ AMyCharacter::AMyCharacter()
 
 	//Default value for how many items can our character pick at once
 	StackGrabLimit = 4;
+	
+	//Default speed multiplier
+	CharacterSpeed = 0.4;
 }
 
 // Called when the game starts or when spawned
@@ -189,7 +192,7 @@ void AMyCharacter::GrabWithTwoHands()
 	*/
 
 	//If something is allready held in hands
-	if (TwoHandSlot.Num() || LeftHandSlot || RightHandSlot)
+	if (TwoHandSlot.Num() || LeftHandSlot || RightHandSlot || (SelectedObject && SelectedObject->ActorHasTag(FName(TEXT("Tray")))))
 	{
 		PopUp.Broadcast(FString(TEXT("Allready holding something!")));
 		return;
@@ -207,10 +210,11 @@ void AMyCharacter::GrabWithTwoHands()
 	if (!HighlightedActor)
 	{
 		PopUp.Broadcast(FString(TEXT("Nothing to pick")));
+		return;
 	}
 
 	//If highlighted actor is not pickable
-	if (!HitObject.GetActor()->ActorHasTag(FName(TEXT("Stackable"))))
+	if (!HighlightedActor->ActorHasTag(FName(TEXT("Stackable"))))
 	{
 		PopUp.Broadcast(FString(TEXT("Can't pick that with two hands")));
 		return;
@@ -223,9 +227,16 @@ void AMyCharacter::GrabWithTwoHands()
 		return;
 	}
 
+	//If object is a tray
+	if (HighlightedActor->ActorHasTag(FName(TEXT("Tray"))))
+	{
+		PickTray(HighlightedActor);
+		UpdateCharacterSpeed();
+		return;
+	}
+
 	//Local variables to perform computation
 	TSet<AActor*> LocalStackVariable = GetStack(HighlightedActor);
-	TSet<AActor*> ReturnStack;
 
 	//Making sure stack is pickable by not having any elements on top (eg: Spoon, Knife)
 	if (HasAnyOnTop(LocalStackVariable[FSetElementId::FromInteger(LocalStackVariable.Num() - 1)]))
@@ -234,24 +245,31 @@ void AMyCharacter::GrabWithTwoHands()
 		return;
 	}
 
-	if (HighlightedActor->ActorHasTag(FName(TEXT("Stackable"))))
+	int FirstIndex = 0;
+	if (LocalStackVariable.Num() >= StackGrabLimit)
 	{
-		int FirstIndex = 0;
-		if (LocalStackVariable.Num() > StackGrabLimit)
-		{
-			FirstIndex = LocalStackVariable.Num() - StackGrabLimit;
-		}
-
-		for (int i = FirstIndex; i < LocalStackVariable.Num(); i++)
-		{
-			GetStaticMesh(LocalStackVariable[FSetElementId::FromInteger(i)])->SetEnableGravity(false);
-			GetStaticMesh(LocalStackVariable[FSetElementId::FromInteger(i)])->SetCollisionEnabled(ECollisionEnabled::NoCollision);
-			ReturnStack.Add(LocalStackVariable[FSetElementId::FromInteger(i)]);
-		}
-		TwoHandSlot = ReturnStack;
-		SelectedObject = LocalStackVariable[FSetElementId::FromInteger(LocalStackVariable.Num()-1)];
-		GetStaticMesh(SelectedObject)->SetCustomDepthStencilValue(2);
+		FirstIndex = LocalStackVariable.Num() - StackGrabLimit;
 	}
+
+	for (int i = FirstIndex; i < LocalStackVariable.Num(); i++)
+	{
+		TwoHandSlot.Add(LocalStackVariable[FSetElementId::FromInteger(i)]);
+
+		GetStaticMesh(LocalStackVariable[FSetElementId::FromInteger(i)])->SetSimulatePhysics(false);
+		GetStaticMesh(LocalStackVariable[FSetElementId::FromInteger(i)])->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+
+		if (i != FirstIndex)
+		{
+			LocalStackVariable[FSetElementId::FromInteger(i)]->AttachToActor(LocalStackVariable[FSetElementId::FromInteger(FirstIndex)], FAttachmentTransformRules::KeepWorldTransform);
+		}
+	}
+	
+	GetStaticMesh(LocalStackVariable[FSetElementId::FromInteger(FirstIndex)])->SetWorldLocation(GetActorLocation() + FVector(8.f, 8.f, 8.f) * GetActorForwardVector() + FVector(0.f, 0.f, 20.f));
+	LocalStackVariable[FSetElementId::FromInteger(FirstIndex)]->AttachToComponent(GetCapsuleComponent(), FAttachmentTransformRules::KeepWorldTransform);
+
+	SelectedObject = LocalStackVariable[FSetElementId::FromInteger(FirstIndex)];
+
+	UpdateCharacterSpeed();
 }
 
 /*Method to place a selected object at a certain location, relative to a line trace hit result
@@ -291,9 +309,11 @@ void AMyCharacter::PlaceOnTop(AActor* ActorToPlace, FHitResult HitSurface)
 	{
 		GetStaticMesh(ActorToPlace)->AddLocalOffset(FVector(0.f, 0.f, 0.1f));
 	}
-	//Reactivate the gravity and other properties which have been modified in order to permit manipulation
-	GetStaticMesh(ActorToPlace)->SetEnableGravity(true);
+
+	//Reactivate physics other properties which have been modified in order to permit manipulation
 	GetStaticMesh(ActorToPlace)->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
+	GetStaticMesh(ActorToPlace)->SetSimulatePhysics(true);
+
 	//Disable Rotation mode
 	bRotationModeAllowed = false;
 	//Reset rotation index to default 0
@@ -372,7 +392,7 @@ void AMyCharacter::Tick(float DeltaTime)
 	else
 	{
 		//Turn off the highlight effect because we can't pick up with this hand.
-		if (HighlightedActor && HighlightedActor)
+		if (HighlightedActor)
 		{
 			GetStaticMesh(HighlightedActor)->SetRenderCustomDepth(false);
 			HighlightedActor = nullptr;
@@ -380,15 +400,14 @@ void AMyCharacter::Tick(float DeltaTime)
 
 		//Enable the player to access rotation mode
 		bRotationModeAllowed = true;
-
 	}
 
 	//Draw object from the right hand
 	if (RightHandSlot)
 	{
+		//Update actor rotation based on inputs from user
 		RightHandSlot->SetActorRotation(RightHandRotator + FRotator(0.f, GetActorRotation().Yaw, 0.f));
-		GetStaticMesh(RightHandSlot)->SetWorldLocation(GetActorLocation() + FVector(20.f, 20.f, 20.f) * GetActorForwardVector() + FVector(RightYPos, RightYPos, RightYPos) * GetActorRightVector() + FVector(0.f, 0.f, RightZPos));
-
+		
 		//Add highlight if it is selected
 		if (SelectedObject == RightHandSlot)
 		{
@@ -403,8 +422,8 @@ void AMyCharacter::Tick(float DeltaTime)
 	//Draw object from the left hand
 	if (LeftHandSlot)
 	{
+		//Update actor rotation based on inputs from user
 		LeftHandSlot->SetActorRotation(LeftHandRotator + FRotator(0.f, GetActorRotation().Yaw, 0.f));
-		GetStaticMesh(LeftHandSlot)->SetWorldLocation(GetActorLocation() + FVector(20.f, 20.f, 20.f) * GetActorForwardVector() - FVector(LeftYPos, LeftYPos, LeftYPos) * GetActorRightVector() + FVector(0.f, 0.f, LeftZPos));
 
 		//Add highlight if it is selected
 		if (SelectedObject == LeftHandSlot)
@@ -414,34 +433,6 @@ void AMyCharacter::Tick(float DeltaTime)
 		else
 		{
 			GetStaticMesh(LeftHandSlot)->SetRenderCustomDepth(false);
-		}
-	}
-
-	//Draw the stack held in hands if there is one
-	if (TwoHandSlot.Num())
-	{
-		float LastItemOldZ = 0;
-		float ZOffset = 0;
-		
-		for (AActor* StackItem : TwoHandSlot)
-		{
-			if (LastItemOldZ)
-			{
-				ZOffset += StackItem->GetActorLocation().Z - LastItemOldZ;
-			}
-			LastItemOldZ = StackItem->GetActorLocation().Z;
-
-			StackItem->SetActorRotation(FRotator(0.f, GetActorRotation().Yaw, 0.f));
-			GetStaticMesh(StackItem)->SetWorldLocation(GetActorLocation() + FVector(8.f, 8.f, 8.f) * GetActorForwardVector() + FVector(0.f, 0.f, 20.f + ZOffset));
-		}
-		//Add highlight if it is selected
-		if (TwoHandSlot.Contains(SelectedObject))
-		{
-			GetStaticMesh(SelectedObject)->SetRenderCustomDepth(true);
-		}
-		else
-		{
-			GetStaticMesh(SelectedObject)->SetRenderCustomDepth(false);
 		}
 	}
 }
@@ -501,7 +492,7 @@ void AMyCharacter::MoveForward(const float Value)
 		}
 		// add movement in that direction
 		const FVector Direction = FRotationMatrix(Rotation).GetScaledAxis(EAxis::X);
-		AddMovementInput(Direction, Value *0.5);
+		AddMovementInput(Direction, Value * CharacterSpeed);
 	}
 }
 
@@ -513,7 +504,7 @@ void AMyCharacter::MoveRight(const float Value)
 		const FRotator Rotation = Controller->GetControlRotation();
 		const FVector Direction = FRotationMatrix(Rotation).GetScaledAxis(EAxis::Y);
 		// add movement in that direction
-		AddMovementInput(Direction, Value *0.5);
+		AddMovementInput(Direction, Value * CharacterSpeed);
 	}
 }
 
@@ -521,6 +512,11 @@ void AMyCharacter::MoveRight(const float Value)
 void AMyCharacter::SwitchSelectedHand()
 {
 	if (TwoHandSlot.Num())
+	{
+		return;
+	}
+
+	if (SelectedObject && SelectedObject->ActorHasTag(FName(TEXT("Tray"))))
 	{
 		return;
 	}
@@ -592,6 +588,13 @@ void AMyCharacter::Click()
 		DropFromInventory(SelectedObject, HitObject);
 	}
 
+	//Case when user tries to pick a tray
+	if (HitObject.GetActor()->ActorHasTag(FName(TEXT("Tray"))))
+	{
+		PopUp.Broadcast(FString(TEXT("Can't pick that with one hand!")));
+		return;
+	}
+
 	//Behaviour when wanting to grab an item or opening/closing actions
 	else if (HighlightedActor)
 	{
@@ -608,6 +611,8 @@ void AMyCharacter::Click()
 			OpenCloseAction(HighlightedActor);
 		}
 	}
+
+	UpdateCharacterSpeed();
 }
 
 /*Method called to pick up an item from the world in one of the hand slots of the character.
@@ -635,16 +640,27 @@ void AMyCharacter::PickToInventory(AActor* CurrentObject)
 	{
 		RightHandSlot = CurrentObject;
 		RightHandRotator = RightHandSlot->GetActorRotation() - GetActorRotation();
+
+		//Place actor in front of character in the right hand slot
+		GetStaticMesh(RightHandSlot)->SetWorldLocation(GetActorLocation() + FVector(20.f, 20.f, 20.f) * GetActorForwardVector() + FVector(RightYPos, RightYPos, RightYPos) * GetActorRightVector() + FVector(0.f, 0.f, RightZPos));
+
 	}
 	else
 	{
 		LeftHandSlot = CurrentObject;
 		LeftHandRotator = LeftHandSlot->GetActorRotation() - GetActorRotation();
+
+		//Place actor in front of character in the left hand slot
+		GetStaticMesh(LeftHandSlot)->SetWorldLocation(GetActorLocation() + FVector(20.f, 20.f, 20.f) * GetActorForwardVector() - FVector(LeftYPos, LeftYPos, LeftYPos) * GetActorRightVector() + FVector(0.f, 0.f, LeftZPos));
 	}
 
-	//Deactivate the gravity and collision
-	GetStaticMesh(CurrentObject)->SetEnableGravity(false);
+	//Turn off physics and collision 
+	GetStaticMesh(CurrentObject)->SetSimulatePhysics(false);
 	GetStaticMesh(CurrentObject)->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+
+	//Attatch item to capsule of the character so that it copies position and rotation changes
+	CurrentObject->AttachToComponent(GetCapsuleComponent(), FAttachmentTransformRules::KeepWorldTransform);
+
 	//Ignore clicking on item if held in hand
 	TraceParams.AddIgnoredComponent(GetStaticMesh(CurrentObject));
 }
@@ -667,42 +683,34 @@ void AMyCharacter::DropFromInventory(AActor* CurrentObject, FHitResult HitSurfac
 		return;
 	}
 
-	//Case in which we are holding a stack
-	if (TwoHandSlot.Num())
-	{
-		bool bFirstLoop = true;
-		FVector WorldPositionChange = FVector(0.f, 0.f, 0.f);
-
-		for (auto Iterator : TwoHandSlot)
-		{
-			GetStaticMesh(Iterator)->SetEnableGravity(true);
-			GetStaticMesh(Iterator)->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
-
-			if (!bFirstLoop)
-			{
-				GetStaticMesh(Iterator)->SetWorldLocation(Iterator->GetActorLocation() - WorldPositionChange);
-			}
-
-			else
-			{
-				WorldPositionChange = Iterator->GetActorLocation();
-				PlaceOnTop(Iterator, HitSurface);
-				WorldPositionChange = WorldPositionChange - Iterator->GetActorLocation();
-				bFirstLoop = false;
-			}
-		}
-		TwoHandSlot.Empty();
-		GetStaticMesh(SelectedObject)->SetCustomDepthStencilValue(1);
-		GetStaticMesh(SelectedObject)->SetRenderCustomDepth(false);
-		SelectedObject = nullptr;
-		return;
-	}
-
+	//Place actor in the world
 	PlaceOnTop(CurrentObject, HitSurface);
-	
+
 	//Reset ignored parameters
 	TraceParams.ClearIgnoredComponents();
 
+	//Reset outline color to blue
+	GetStaticMesh(CurrentObject)->SetCustomDepthStencilValue(1);
+
+	//When holding a stack
+	if (TwoHandSlot.Num())
+	{
+		GetStaticMesh(CurrentObject)->SetSimulatePhysics(true);
+		GetStaticMesh(CurrentObject)->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
+
+		for (auto Iterator : TwoHandSlot)
+		{
+			GetStaticMesh(Iterator)->SetSimulatePhysics(true);
+			GetStaticMesh(Iterator)->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
+		}
+
+		TwoHandSlot.Empty();
+
+		SelectedObject = nullptr;
+
+		return;
+	}
+	
 	//Remove the reference to the object because we are not holding it any more
 	if (bRightHandSelected)
 	{
@@ -732,8 +740,6 @@ void AMyCharacter::DropFromInventory(AActor* CurrentObject, FHitResult HitSurfac
 		}
 	}
 
-	//Reset outline color to blue
-	GetStaticMesh(SelectedObject)->SetCustomDepthStencilValue(1);
 	//Remove the reference because we just dropped the item that was selected
 	SelectedObject = nullptr;
 }
@@ -833,7 +839,7 @@ void AMyCharacter::MoveItemY(const float Value)
 	}
 }
 
-/*Method which stop the character from picking objects if they support any other item on top
+/*Method which stop the character from picking objects if they support any other item on top.
 @param AActor* CheckActor  -->  Object on top of which to search for other items*/
 bool AMyCharacter::HasAnyOnTop(const AActor* CheckActor)
 {
@@ -862,6 +868,96 @@ bool AMyCharacter::HasAnyOnTop(const AActor* CheckActor)
 	return false;
 }
 
+/*Same as HasAnyOnTop() method, but instead of returning true or false it returns a set of items on top.
+The list contains a reference to each actor on top, and the first element is the tray itself.*/
+TSet<AActor*> AMyCharacter::GetAllActorsOnTop(const AActor* CheckActor)
+{
+	TSet<AActor*> ActorsOnTop;
 
+	GetStaticMesh(CheckActor)->GetLocalBounds(Min, Max);
+	FVector LowBound = CheckActor->GetActorLocation() + Min;
+	FVector HighBound = CheckActor->GetActorLocation() + Max;
+	FVector HMin, HMax;
+	FVector CheckActorLocation = CheckActor->GetActorLocation();
 
+	//Loop through the list of items and check if it's location is on top of our item of interest
+	for (const auto Item : ItemMap)
+	{
+		FVector IteratorLocation = Item.Key->GetActorLocation();
 
+		if (Item.Key != CheckActor &&
+			(LowBound.X < IteratorLocation.X && HighBound.X > IteratorLocation.X) &&
+			(LowBound.Y < IteratorLocation.Y && HighBound.Y > IteratorLocation.Y) &&
+			(CheckActor->GetActorLocation().Z + Min.Z< IteratorLocation.Z && HighBound.Z + 15 > IteratorLocation.Z))
+		{
+			GetStaticMesh(Item.Key)->GetLocalBounds(HMin, HMax);
+			if (IteratorLocation.Z + HMin.Z > CheckActor->GetActorLocation().Z + Min.Z)
+			{
+				ActorsOnTop.Add(Item.Key);
+			}
+		}
+	}
+	return ActorsOnTop;
+}
+
+void AMyCharacter::UpdateCharacterSpeed()
+{
+	//Reset to default
+	CharacterSpeed = 0.4;
+
+	//Check if holding stack
+	if (TwoHandSlot.Num())
+	{
+		CharacterSpeed = 0.15;
+		return;
+	}
+
+	//Decrement for each hand slot ocupied
+	if (LeftHandSlot)
+	{
+		CharacterSpeed -= 0.1;
+	}
+	if (RightHandSlot)
+	{
+		CharacterSpeed -= 0.1;
+	}
+	return;
+}
+
+void AMyCharacter::PickTray(AActor* Tray)
+{
+	
+	SelectedObject = Tray;
+
+	//Populate the list of items
+	TwoHandSlot = GetAllActorsOnTop(Tray);
+
+	GetStaticMesh(Tray)->SetSimulatePhysics(false);
+	GetStaticMesh(Tray)->SetCollisionEnabled(ECollisionEnabled::NoCollision);	
+
+	for (auto Iterator : TwoHandSlot)
+	{
+		GetStaticMesh(Iterator)->SetSimulatePhysics(false);
+		GetStaticMesh(Iterator)->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+		
+
+		//Attatch item to capsule of the character so that it copies position and rotation changes
+		Iterator->AttachToActor(Tray, FAttachmentTransformRules::KeepWorldTransform);
+	}
+
+	//Position tray in front of character
+	if ((GetActorForwardVector() * Tray->GetActorForwardVector()).X > 0)
+	{
+		Tray->SetActorRotation(FRotator(0.f, GetActorRotation().Yaw - 90.f, 0.f));
+	}
+	else
+	{
+		Tray->SetActorRotation(FRotator(0.f, GetActorRotation().Yaw + 90.f, 0.f));
+	}
+
+	//Position in front of character
+	GetStaticMesh(Tray)->SetWorldLocation(GetActorLocation() + FVector(8.f, 8.f, 8.f) * GetActorForwardVector() + FVector(0.f, 0.f, 20.f));
+
+	//Attatch tray to character
+	Tray->AttachToComponent(GetCapsuleComponent(), FAttachmentTransformRules::KeepWorldTransform);
+}

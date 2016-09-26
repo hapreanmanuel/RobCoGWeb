@@ -117,6 +117,7 @@ public:
 	//List to hold all stackables from world
 	TSet<AActor*> AllStackableItems;
 
+	//**********************************
 	//Variable which holds stacked items when manipulated
 	TSet<AActor*> TwoHandSlot;
 
@@ -130,6 +131,10 @@ public:
 	//Delegate which tells the game mode when the players feels the tasks are complete
 	UPROPERTY(BlueprintAssignable, Category = "Interface")
 	FSubmitProgress Sub;
+
+	//Variable to change the speed of the character
+	UPROPERTY(BlueprintReadOnly, VisibleAnywhere)
+	float CharacterSpeed;
 
 
 protected:
@@ -199,5 +204,13 @@ protected:
 	//Method to check if an item is pickable (that it does not have other item on top of it)
 	bool HasAnyOnTop(const AActor* CheckActor);
 
+	//Method to return all items residing on top of an actor
+	TSet<AActor*> GetAllActorsOnTop(const AActor* CheckActor);
+
+	//Method to update the speed based on it's state (if it holds items)
+	void UpdateCharacterSpeed();
+
+	//Method to pick tray with items on top
+	void PickTray(AActor* Tray);
 
 };
